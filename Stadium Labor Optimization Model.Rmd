@@ -1,0 +1,112 @@
+---
+title: "Stadium Labor Optimization Model"
+author: "Kainoa Pajo"
+date: "2026-01-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(tidymodels)
+library(lubridate)
+library(vip)
+```
+
+# Project Description: 
+Predicting staffing needs based on event type,
+attendance, and weather conditions.
+
+# =======================================================
+# 1. DATA SIMULATION
+# Simulating historical event data to train labor allocation model
+# =======================================================
+
+```{r}
+set.seed(123) 
+
+n_events <- 100
+
+stadium_data <- tibble(
+  event_id = 1:n_events,
+  date = seq(as.Date("2024-01-01"), by = "week", length.out = n_events),
+  
+  # Event categorization
+  event_type = sample(c("NFL Game", "Concert", "Soccer Match", "Monster Jam"), 
+                      n_events, replace = TRUE),
+  
+  # Attendance distributions based on capacity logic
+  attendance = case_when(
+    event_type == "NFL Game" ~ round(runif(n_events, 65000, 72000)),
+    event_type == "Concert" ~ round(runif(n_events, 45000, 70000)),
+    event_type == "Soccer Match" ~ round(runif(n_events, 30000, 60000)),
+    TRUE ~ round(runif(n_events, 40000, 55000))
+  ),
+  
+  # Environmental variables
+  temp_f = round(rnorm(n_events, mean = 72, sd = 8)),
+  is_raining = sample(c(0, 1), n_events, replace = TRUE, prob = c(0.9, 0.1))
+) %>%
+  # Target variable generation (Historical Staffing Levels)
+  mutate(
+    staff_needed = 200 + (attendance / 200) + 
+      ifelse(event_type == "Concert", 50, 0) +   
+      ifelse(is_raining == 1, 30, 0) +           
+      round(rnorm(n_events, 0, 10))              
+  )
+
+# Export for Tableau Visualization
+write_csv(stadium_data, "stadium_data_processed.csv")
+```
+
+# =======================================================
+# 2. MODEL TRAINING (Random Forest)
+# =======================================================
+
+```{r}
+# 80/20 Train-Test Split
+data_split <- initial_split(stadium_data, prop = 0.80)
+train_data <- training(data_split)
+test_data  <- testing(data_split)
+
+# Preprocessing Recipe
+labor_recipe <- recipe(staff_needed ~ event_type + attendance + temp_f + is_raining, 
+                       data = train_data) %>%
+  step_dummy(all_nominal_predictors()) 
+
+# Model Specification (Random Forest Regressor)
+rf_spec <- rand_forest(trees = 500) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("regression")
+
+# Workflow Execution
+labor_workflow <- workflow() %>%
+  add_recipe(labor_recipe) %>%
+  add_model(rf_spec)
+
+rf_fit <- labor_workflow %>%
+  fit(data = train_data)
+```
+
+# =======================================================
+# 3. PERFORMANCE EVALUATION
+# =======================================================
+
+```{r}
+# Generate Predictions
+results <- test_data %>%
+  bind_cols(predict(rf_fit, test_data)) %>%
+  rename(predicted_staff = .pred)
+
+# Calculate RMSE
+metrics <- results %>%
+  metrics(truth = staff_needed, estimate = predicted_staff)
+
+print(metrics)
+
+# Variable Importance Plot
+rf_fit %>%
+  extract_fit_parsnip() %>%
+  vip() +
+  labs(title = "Feature Importance: Drivers of Labor Demand")
+```
